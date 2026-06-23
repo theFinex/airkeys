@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AirKeys — play MIDI with your hands</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body{font-family:system-ui,'Segoe UI',sans-serif}
+  .no-scrollbar::-webkit-scrollbar{display:none}.no-scrollbar{-ms-overflow-style:none;scrollbar-width:none}
+</style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen overflow-hidden flex flex-col">
+
+<header class="bg-zinc-900/80 border-b border-zinc-800 px-5 py-3 flex justify-between items-center z-20 flex-wrap gap-2">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl">🎹</span>
+    <div>
+      <h1 class="text-lg font-bold tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-fuchsia-400 to-cyan-400">AirKeys</h1>
+      <p class="text-[11px] text-zinc-400">Move your hand to play · outputs real MIDI to any DAW</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-2 text-xs flex-wrap">
+    <select id="midi-out" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5"><option value="">Built-in synth only</option></select>
+    <select id="root" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5"></select>
+    <select id="scale" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5"></select>
+    <select id="oct" class="bg-zinc-800 border border-zinc-700 rounded px-2 py-1.5"></select>
+    <div class="font-mono text-zinc-400">FPS <span id="fps" class="text-emerald-400 font-bold">0</span></div>
+  </div>
+</header>
+
+<main class="flex-1 flex flex-col md:flex-row overflow-hidden">
+  <section class="flex-1 relative bg-black flex items-center justify-center">
+    <video id="cam" class="absolute inset-0 w-full h-full object-cover transform -scale-x-100" playsinline autoplay muted></video>
+    <canvas id="cv" class="absolute inset-0 w-full h-full transform -scale-x-100"></canvas>
+    <!-- note readout (not mirrored) -->
+    <div class="absolute top-3 left-3 bg-zinc-900/70 backdrop-blur px-4 py-2 rounded-xl border border-zinc-800 font-mono text-sm">
+      <div>Note: <span id="note-name" class="text-cyan-400 font-bold">—</span></div>
+      <div>Gate: <span id="gate" class="text-fuchsia-400 font-bold">off</span></div>
+      <div>Filter: <span id="filt" class="text-amber-300 font-bold">0%</span></div>
+    </div>
+    <div id="hint" class="absolute bottom-3 left-1/2 -translate-x-1/2 bg-zinc-900/80 px-4 py-2 rounded-xl border border-zinc-800 text-xs text-zinc-300 text-center">
+      Click <b class="text-emerald-400">Start</b> · move hand left↔right to pick a note · <b>pinch</b> thumb+index to play · raise/lower hand = brighter/darker
+    </div>
+  </section>
+
+  <aside class="w-full md:w-72 bg-zinc-900/60 border-l border-zinc-800 p-4 flex flex-col gap-3 overflow-y-auto no-scrollbar text-sm">
+    <button id="start" class="bg-emerald-600 hover:bg-emerald-500 rounded-lg py-2.5 font-bold">▶ Start camera</button>
+    <button id="panic" class="bg-rose-700/40 hover:bg-rose-700/60 border border-rose-700 rounded-lg py-2 text-rose-200 text-xs font-semibold">⏹ All notes off (panic)</button>
+
+    <label class="flex items-center justify-between bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2">
+      <span>Built-in synth</span><input type="checkbox" id="synth-on" checked class="accent-emerald-500">
+    </label>
+    <label class="flex flex-col gap-1 bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2">
+      <span class="text-[11px] text-zinc-400">MIDI channel <span id="ch-val" class="font-mono text-zinc-200">1</span></span>
+      <input type="range" id="ch" min="1" max="16" value="1" class="accent-cyan-500">
+    </label>
+    <label class="flex items-center justify-between bg-zinc-950/60 border border-zinc-800 rounded-lg px-3 py-2">
+      <span>Glide (legato)</span><input type="checkbox" id="glide" checked class="accent-emerald-500">
+    </label>
+
+    <div class="bg-zinc-950/70 border border-zinc-800 rounded-lg p-3 text-[11px] text-zinc-400 leading-relaxed">
+      <div class="font-semibold text-cyan-400 mb-1 uppercase tracking-widest text-[10px]">Send into a DAW (Windows)</div>
+      1. Install <b>loopMIDI</b> (free) → create a port.<br>
+      2. Here, pick that port in the top-right <b>MIDI out</b> dropdown.<br>
+      3. In your DAW, set a track's MIDI input to loopMIDI &amp; arm it.<br>
+      <span class="text-zinc-500">Mac: enable the IAC Driver in Audio MIDI Setup.</span>
+    </div>
+    <div id="midi-status" class="text-[11px] text-zinc-500"></div>
+  </aside>
+</main>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver }
+  from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/vision_bundle.mjs";
+
+const $=id=>document.getElementById(id);
+const cam=$('cam'), cv=$('cv'), ctx=cv.getContext('2d');
+
+/* ---------- scales ---------- */
+const NOTE_NAMES=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const SCALES={ 'Major Pentatonic':[0,2,4,7,9], 'Minor Pentatonic':[0,3,5,7,10], 'Major':[0,2,4,5,7,9,11], 'Natural Minor':[0,2,3,5,7,8,10], 'Blues':[0,3,5,6,7,10], 'Chromatic':[0,1,2,3,4,5,6,7,8,9,10,11] };
+let root=0, scaleName='Major Pentatonic', baseOct=4, COLS=16, notes=[];
+NOTE_NAMES.forEach((n,i)=>$('root').add(new Option(n,i)));
+Object.keys(SCALES).forEach(s=>$('scale').add(new Option(s,s)));
+for(let o=2;o<=6;o++) $('oct').add(new Option('Octave '+o,o));
+$('scale').value=scaleName; $('oct').value=baseOct;
+function buildNotes(){
+  const iv=SCALES[scaleName]; notes=[];
+  let midi=12*(baseOct+1)+root; // C4=60
+  let degree=0;
+  while(notes.length<COLS){
+    const octShift=Math.floor(degree/iv.length)*12;
+    notes.push(midi+iv[degree%iv.length]+octShift);
+    degree++;
+  }
+}
+buildNotes();
+$('root').onchange=e=>{root=+e.target.value;buildNotes();};
+$('scale').onchange=e=>{scaleName=e.target.value;buildNotes();};
+$('oct').onchange=e=>{baseOct=+e.target.value;buildNotes();};
+
+/* ---------- MIDI out ---------- */
+let midiOut=null, channel=0;
+$('ch').oninput=e=>{ channel=(+e.target.value)-1; $('ch-val').textContent=e.target.value; };
+if(navigator.requestMIDIAccess){
+  navigator.requestMIDIAccess().then(acc=>{
+    const fill=()=>{ const sel=$('midi-out'); const cur=sel.value; sel.length=1;
+      acc.outputs.forEach(o=>sel.add(new Option(o.name, o.id))); sel.value=cur; };
+    fill(); acc.onstatechange=fill;
+    $('midi-out').onchange=e=>{ midiOut = e.target.value? acc.outputs.get(e.target.value):null; $('midi-status').textContent = midiOut? 'MIDI → '+midiOut.name : 'Built-in synth only'; };
+    $('midi-status').textContent='WebMIDI ready ('+acc.outputs.size+' output(s)).';
+  }, ()=>{ $('midi-status').textContent='WebMIDI blocked — built-in synth still works.'; });
+} else $('midi-status').textContent='This browser has no WebMIDI — use Chrome/Edge. Built-in synth works.';
+function midiSend(b){ try{ midiOut&&midiOut.send(b); }catch(e){} }
+
+/* ---------- built-in synth (mono, glide) ---------- */
+let AC=null, master=null, filter=null, voice=null, synthOn=true;
+$('synth-on').onchange=e=>synthOn=e.target.checked;
+function initAudio(){ if(AC) return; AC=new (window.AudioContext||window.webkitAudioContext)();
+  filter=AC.createBiquadFilter(); filter.type='lowpass'; filter.frequency.value=1200; filter.Q.value=6;
+  master=AC.createGain(); master.gain.value=0.0001; filter.connect(master); master.connect(AC.destination);
+}
+const mtof=m=>440*Math.pow(2,(m-69)/12);
+function synthOn_(midi){ if(!synthOn) return; initAudio();
+  const glide=$('glide').checked;
+  if(voice && glide){ voice.osc.frequency.linearRampToValueAtTime(mtof(midi), AC.currentTime+0.06); return; }
+  synthOff_();
+  const osc=AC.createOscillator(); osc.type='sawtooth'; osc.frequency.value=mtof(midi);
+  osc.connect(filter); osc.start(); voice={osc};
+  master.gain.cancelScheduledValues(AC.currentTime);
+  master.gain.setTargetAtTime(0.22, AC.currentTime, 0.01);
+}
+function synthOff_(){ if(!AC) return; master.gain.setTargetAtTime(0.0001, AC.currentTime, 0.08);
+  if(voice){ const v=voice; voice=null; setTimeout(()=>{try{v.osc.stop();}catch(e){}},300); } }
+function setFilter(v01){ if(AC) filter.frequency.setTargetAtTime(300+v01*6000, AC.currentTime, 0.02); }
+
+/* ---------- play state ---------- */
+let curNote=-1, gated=false;
+function noteOn(n,vel=100){ if(n===curNote&&gated) return;
+  if(gated && n!==curNote){ midiSend([0x80|channel,curNote,0]); }   // release old
+  curNote=n; gated=true;
+  midiSend([0x90|channel,n,vel]); synthOn_(n);
+  $('note-name').textContent=NOTE_NAMES[n%12]+(Math.floor(n/12)-1); $('gate').textContent='ON';
+}
+function noteOff(){ if(!gated) return; midiSend([0x80|channel,curNote,0]); synthOff_(); gated=false; $('gate').textContent='off'; }
+function panic(){ for(let n=0;n<128;n++) midiSend([0x80|channel,n,0]); midiSend([0xB0|channel,123,0]); synthOff_(); gated=false; curNote=-1; $('gate').textContent='off'; }
+$('panic').onclick=panic;
+
+/* ---------- hand tracking ---------- */
+let lm=null, running=false, lastT=-1, frames=0, fpsT=performance.now(), wasPinch=false, lastCC=-1;
+function dist(a,b){ return Math.hypot(a.x-b.x,a.y-b.y,(a.z-b.z)||0); }
+async function init(){ const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/wasm");
+  lm=await HandLandmarker.createFromOptions(fs,{ baseOptions:{ modelAssetPath:"https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task", delegate:"GPU" }, runningMode:"VIDEO", numHands:1 }); }
+async function start(){ if(running) return; initAudio(); if(AC.state==='suspended') AC.resume();
+  try{ if(!lm) await init();
+    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}}});
+    cam.srcObject=s; await new Promise(r=>{ if(cam.readyState>=1)r(); else cam.onloadedmetadata=()=>r(); });
+    try{ await cam.play(); }catch(_){}
+    cv.width=cam.videoWidth||640; cv.height=cam.videoHeight||480; running=true; loop();
+  }catch(e){ $('hint').textContent='Camera error: '+e.message; } }
+$('start').onclick=start;
+
+function drawGrid(activeCol){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  const w=cv.width/COLS;
+  for(let i=0;i<COLS;i++){
+    ctx.fillStyle = i===activeCol ? 'rgba(34,230,255,0.18)' : (i%2? 'rgba(255,255,255,0.03)':'rgba(255,255,255,0.06)');
+    ctx.fillRect(i*w,0,w,cv.height);
+    ctx.strokeStyle='rgba(255,255,255,0.08)'; ctx.strokeRect(i*w,0,w,cv.height);
+    // note label (counter-mirror text so it reads correctly)
+    const n=notes[i]; ctx.save(); ctx.translate((i+0.5)*w, cv.height-14); ctx.scale(-1,1);
+    ctx.fillStyle = i===activeCol? '#22e6ff':'rgba(255,255,255,0.45)'; ctx.font='12px monospace'; ctx.textAlign='center';
+    ctx.fillText(NOTE_NAMES[n%12]+(Math.floor(n/12)-1), 0,0); ctx.restore();
+  }
+}
+function loop(){ if(!running) return; const now=performance.now();
+  if(cam.readyState>=2 && cam.videoWidth>0 && cam.currentTime!==lastT){ lastT=cam.currentTime;
+    try{ process(lm.detectForVideo(cam,now)); }catch(e){} }
+  frames++; if(now-fpsT>=500){ $('fps').textContent=Math.round(frames*1000/(now-fpsT)); frames=0; fpsT=now; }
+  requestAnimationFrame(loop);
+}
+function process(res){
+  const hands=res.landmarks||[];
+  if(!hands.length){ drawGrid(-1); if(gated) noteOff(); wasPinch=false; return; }
+  const h=hands[0], tip=h[8];
+  const col=Math.max(0,Math.min(COLS-1,Math.floor(tip.x*COLS)));   // tip.x is raw (canvas is CSS-mirrored to match)
+  drawGrid(col);
+  // pinch gate
+  const palm=dist(h[0],h[9])||1e-3, pinch=dist(h[4],h[8])/palm;
+  const isPinch=pinch<0.42;
+  if(isPinch) noteOn(notes[col],100); else if(gated) noteOff();
+  // vertical → filter brightness + CC74
+  const v01=Math.max(0,Math.min(1,1-tip.y));
+  setFilter(v01); $('filt').textContent=Math.round(v01*100)+'%';
+  const cc=Math.round(v01*127); if(cc!==lastCC){ midiSend([0xB0|channel,74,cc]); lastCC=cc; }
+  // draw fingertip
+  ctx.beginPath(); ctx.arc(tip.x*cv.width, tip.y*cv.height, isPinch?14:9,0,7);
+  ctx.fillStyle=isPinch?'#ff2bd6':'#22e6ff'; ctx.shadowColor=ctx.fillStyle; ctx.shadowBlur=20; ctx.fill(); ctx.shadowBlur=0;
+}
+</script>
+</body>
+</html>
