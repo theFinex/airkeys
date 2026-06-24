@@ -1,5 +1,7 @@
 # AirKeys — play MIDI with your hands
 
+![AirKeys preview](preview.png)
+
 Turn any webcam into an expressive instrument. Move your hand left↔right to choose a note,
 **pinch** thumb+index to play it, raise/lower your hand to open/close a filter.
 Outputs **real MIDI** to any DAW (via WebMIDI) and has a **built-in synth** so it makes sound instantly.
